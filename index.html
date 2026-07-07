@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>회의비 · 조직관리비 관리대장</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #FAF7F0; font-family: 'Inter', sans-serif; color: #2E2A24; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    const CATEGORY = {
+      org:     { label: '조직관리비', perHead: 20000, color: '#8B6F47', note: '파트장 사용' },
+      meeting: { label: '회의비',     perHead: 50000, color: '#3B5A6B', note: '파트원 전체 사용 · 3개 파트 통합집계' },
+    };
+
+    const STORAGE_KEY = 'budget-tracker-data';
+
+    function ym(d = new Date()) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+    function monthLabel(key) {
+      const [y, m] = key.split('-');
+      return `${y}년 ${parseInt(m)}월`;
+    }
+    function won(n) {
+      return n.toLocaleString('ko-KR') + '원';
+    }
+    function uid() {
+      return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    }
+
+    // SVG icons (inline, no lucide dependency)
+    const IconPlus = () => (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    );
+    const IconTrash = () => (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+    );
+    const IconUsers = () => (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    );
+    const IconChevron = () => (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+    );
+    const IconAlert = () => (
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    );
+    const IconFile = () => (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    );
+    const IconUpload = () => (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+    );
+
+    function BudgetTracker() {
+      const [months, setMonths] = useState({});
+      const [currentMonth, setCurrentMonth] = useState(ym());
+      const [showMonthPicker, setShowMonthPicker] = useState(false);
+      const [form, setForm] = useState({ category: 'meeting', name: '', amount: '', date: '', memo: '' });
+      const [error, setError] = useState('');
+      const [uploadMsg, setUploadMsg] = useState('');
+      const [uploadCategory, setUploadCategory] = useState('meeting');
+      const fileInputRef = useRef(null);
+
+      // Load from localStorage
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            setMonths(parsed.months || {});
+            setCurrentMonth(parsed.lastViewedMonth || ym());
+          }
+        } catch (e) {}
+      }, []);
+
+      const persist = useCallback((nextMonths, lastViewedMonth) => {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ months: nextMonths, lastViewedMonth }));
+          setError('');
+        } catch (e) {
+          setError('저장 중 오류가 발생했어요.');
+        }
+      }, []);
+
+      const monthData = months[currentMonth] || { headcount: 10, entries: [] };
+      const allMonthKeys = Array.from(new Set([...Object.keys(months), currentMonth])).sort().reverse();
+
+      const updateMonth = (monthKey, patch) => {
+        const next = {
+          ...months,
+          [monthKey]: { ...(months[monthKey] || { headcount: 10, entries: [] }), ...patch },
+        };
+        setMonths(next);
+        persist(next, currentMonth);
+      };
+
+      const setHeadcount = (val) => {
+        updateMonth(currentMonth, { headcount: Math.max(0, parseInt(val) || 0) });
+      };
+
+      const addEntry = () => {
+        if (!form.name.trim()) { setError('사용자 이름을 입력해주세요.'); return; }
+        const amt = parseInt(form.amount.replace(/[^0-9]/g, ''));
+        if (!amt || amt <= 0) { setError('금액을 올바르게 입력해주세요.'); return; }
+        setError('');
+        const entry = {
+          id: uid(),
+          category: form.category,
+          name: form.name.trim(),
+          amount: amt,
+          date: form.date || new Date().toISOString().slice(0, 10),
+          memo: form.memo.trim(),
+          source: 'manual',
+        };
+        updateMonth(currentMonth, { entries: [entry, ...(monthData.entries || [])] });
+        setForm({ category: form.category, name: '', amount: '', date: '', memo: '' });
+      };
+
+      const removeEntry = (id) => {
+        updateMonth(currentMonth, { entries: (monthData.entries || []).filter((e) => e.id !== id) });
+      };
+
+      const findCol = (headers, candidates) => {
+        const norm = (s) => String(s).toLowerCase().replace(/[\s_\-()\\.]/g, '');
+        const normHeaders = headers.map(norm);
+        for (const cand of candidates) {
+          const idx = normHeaders.findIndex((h) => h.includes(norm(cand)));
+          if (idx !== -1) return idx;
+        }
+        return -1;
+      };
+
+      const parseExcelDate = (val) => {
+        if (val == null || val === '') return null;
+        if (typeof val === 'number') {
+          if (val >= 19000101 && val <= 21001231 && String(val).length === 8) {
+            const s = String(val);
+            return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+          }
+          const d = XLSX.SSF.parse_date_code(val);
+          if (!d) return null;
+          return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+        }
+        const s = String(val).trim();
+        let m = s.match(/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/);
+        if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+        m = s.match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
+        if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+        m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+        if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+        return null;
+      };
+
+      const handleFileUpload = async (file) => {
+        setError(''); setUploadMsg('');
+        try {
+          const buf = await file.arrayBuffer();
+          const wb = XLSX.read(buf, { type: 'array', cellDates: false });
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
+          if (!rows.length) { setError('엑셀 파일에 데이터가 없어요.'); return; }
+
+          const headers = rows[0];
+          const dateIdx   = findCol(headers, ['Created On', '날짜', 'date', '신청일', '상신일']);
+          const nameIdx   = findCol(headers, ['Creator', '이름', 'name', '신청자', '성명', '사용자']);
+          const amountIdx = findCol(headers, ['Amount(local)', 'Amountlocal', '금액', 'amount', '비용']);
+          const memoIdx   = findCol(headers, ['FM Doc Text', '메모', '비고', 'memo', '내용', '사유']);
+
+          if (dateIdx === -1 || nameIdx === -1 || amountIdx === -1) {
+            setError('날짜(Created On)/이름(Creator)/금액(Amount(local)) 컬럼을 찾지 못했어요.');
+            return;
+          }
+
+          const byMonth = {};
+          let skipped = 0;
+
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.every((c) => c === '')) continue;
+            const dateStr = parseExcelDate(row[dateIdx]);
+            const name = String(row[nameIdx] || '').trim();
+            const amountExVat = Math.abs(parseInt(String(row[amountIdx]).replace(/[^0-9.\-]/g, '')));
+            const amount = amountExVat ? Math.round(amountExVat * 1.1) : 0;
+            if (!dateStr || !name || !amount) { skipped++; continue; }
+
+            const memo = memoIdx !== -1 ? String(row[memoIdx] || '').trim() : '';
+            const mk = dateStr.slice(0, 7);
+            if (!byMonth[mk]) byMonth[mk] = [];
+            byMonth[mk].push({ id: uid(), category: uploadCategory, name, amount, date: dateStr, memo, source: 'excel' });
+          }
+
+          const monthKeys = Object.keys(byMonth);
+          if (!monthKeys.length) { setError('반영 가능한 행을 찾지 못했어요.'); return; }
+
+          const next = { ...months };
+          let totalRemoved = 0;
+          for (const mk of monthKeys) {
+            const existing = next[mk] || { headcount: 10, entries: [] };
+            const kept = (existing.entries || []).filter((e) => !(e.source === 'manual' && e.category === uploadCategory));
+            totalRemoved += (existing.entries || []).length - kept.length;
+            next[mk] = { ...existing, entries: [...byMonth[mk], ...kept] };
+          }
+          setMonths(next);
+          persist(next, currentMonth);
+
+          const totalAdded = monthKeys.reduce((s, mk) => s + byMonth[mk].length, 0);
+          setUploadMsg(
+            `${totalAdded}건 추가됨 (${monthKeys.map(monthLabel).join(', ')})` +
+            (totalRemoved > 0 ? ` · 수기 입력 ${totalRemoved}건 교체됨` : '') +
+            (skipped > 0 ? ` · ${skipped}건 형식 오류로 건너뜀` : '')
+          );
+        } catch (e) {
+          setError('엑셀 파일을 읽는 중 오류가 발생했어요.');
+        }
+      };
+
+      const switchMonth = (key) => {
+        setCurrentMonth(key);
+        setShowMonthPicker(false);
+        persist(months, key);
+      };
+      const goToMonth = (delta) => {
+        const [y, m] = currentMonth.split('-').map(Number);
+        switchMonth(ym(new Date(y, m - 1 + delta, 1)));
+      };
+
+      const headcount = monthData.headcount ?? 10;
+      const entries = monthData.entries || [];
+      const totals = {
+        org:     entries.filter((e) => e.category === 'org').reduce((s, e) => s + e.amount, 0),
+        meeting: entries.filter((e) => e.category === 'meeting').reduce((s, e) => s + e.amount, 0),
+      };
+      const budgets = {
+        org:     headcount * CATEGORY.org.perHead,
+        meeting: headcount * CATEGORY.meeting.perHead,
+      };
+
+      return (
+        <div style={{minHeight:'100vh',background:'#FAF7F0',fontFamily:"'Inter',sans-serif",color:'#2E2A24',padding:'24px 16px 60px'}}>
+          <div style={{maxWidth:640,margin:'0 auto'}}>
+
+            {/* Header */}
+            <header style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:24,flexWrap:'wrap',gap:12}}>
+              <h1 style={{fontFamily:"'Source Serif 4',serif",fontSize:26,fontWeight:700,color:'#2E2A24',letterSpacing:'-0.01em'}}>
+                회의비 · 조직관리비 관리대장
+              </h1>
+              <div style={{display:'flex',alignItems:'center',gap:4,position:'relative'}}>
+                <button onClick={() => goToMonth(-1)} style={S.navBtn}>‹</button>
+                <div style={{position:'relative'}}>
+                  <button onClick={() => setShowMonthPicker(s => !s)} style={S.monthLabel}>
+                    {monthLabel(currentMonth)}
+                    <span style={{marginLeft:4,opacity:0.6,display:'inline-flex'}}><IconChevron/></span>
+                  </button>
+                  {showMonthPicker && (
+                    <div style={S.monthDropdown}>
+                      {allMonthKeys.map(k => (
+                        <button key={k} onClick={() => switchMonth(k)}
+                          style={{...S.monthOption, ...(k===currentMonth ? S.monthOptionActive : {})}}>
+                          {monthLabel(k)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button onClick={() => goToMonth(1)} style={S.navBtn}>›</button>
+              </div>
+            </header>
+
+            {/* Headcount */}
+            <div style={{display:'flex',alignItems:'center',gap:8,background:'#fff',border:'1px solid #E3DCCB',borderRadius:10,padding:'12px 16px',marginBottom:16,flexWrap:'wrap'}}>
+              <span style={{opacity:0.55,display:'inline-flex'}}><IconUsers/></span>
+              <span style={{fontSize:13,color:'#5A5547'}}>이번 달 재직 인원</span>
+              <input type="number" value={headcount} min="0"
+                onChange={e => setHeadcount(e.target.value)}
+                style={{width:56,fontFamily:"'IBM Plex Mono',monospace",fontSize:15,fontWeight:600,border:'1px solid #E3DCCB',borderRadius:6,padding:'4px 8px',textAlign:'center'}}
+              />
+              <span style={{fontSize:13,color:'#5A5547'}}>명</span>
+              <span style={{fontSize:11,color:'#A6A092',marginLeft:'auto',fontFamily:"'IBM Plex Mono',monospace"}}>
+                조직관리비 {won(CATEGORY.org.perHead)}×{headcount} · 회의비 {won(CATEGORY.meeting.perHead)}×{headcount}
+              </span>
+            </div>
+
+            {/* Gauges */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:20}}>
+              {Object.entries(CATEGORY).map(([key, cat]) => {
+                const used = totals[key], budget = budgets[key];
+                const remaining = budget - used;
+                const pct = budget > 0 ? Math.min(100, (used/budget)*100) : 0;
+                const over = remaining < 0;
+                return (
+                  <div key={key} style={{background:'#fff',border:'1px solid #E3DCCB',borderRadius:12,padding:16}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
+                      <div>
+                        <div style={{fontFamily:"'Source Serif 4',serif",fontWeight:700,fontSize:16,color:cat.color}}>{cat.label}</div>
+                        <div style={{fontSize:10.5,color:'#A6A092',marginTop:2}}>{cat.note}</div>
+                      </div>
+                      {over && (
+                        <div style={{display:'flex',alignItems:'center',gap:3,fontSize:10,fontWeight:600,color:'#B3492F',background:'#FBEAE5',padding:'2px 7px',borderRadius:20}}>
+                          <IconAlert/> 초과
+                        </div>
+                      )}
+                    </div>
+                    <div style={{height:8,background:'#F0EBDD',borderRadius:4,overflow:'hidden',marginBottom:10}}>
+                      <div style={{height:'100%',borderRadius:4,transition:'width 0.3s',width:`${pct}%`,background:over?'#B3492F':cat.color}}/>
+                    </div>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:4}}>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}}>
+                        {won(used)} <span style={{fontFamily:"'Inter',sans-serif",fontWeight:400,fontSize:11,color:'#A6A092'}}>사용</span>
+                      </span>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:13,color:over?'#B3492F':'#2E2A24',fontVariantNumeric:'tabular-nums'}}>
+                        {over ? `${won(Math.abs(remaining))} 초과` : `${won(remaining)} 남음`}
+                      </span>
+                    </div>
+                    <div style={{fontSize:10.5,color:'#A6A092'}}>총 예산 {won(budget)}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {error && <div style={{background:'#FBEAE5',color:'#B3492F',border:'1px solid #EFC8BC',borderRadius:8,padding:'10px 14px',fontSize:13,marginBottom:16}}>{error}</div>}
+
+            {/* Form card */}
+            <div style={{background:'#fff',border:'1px solid #E3DCCB',borderRadius:12,padding:16,marginBottom:24}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+                <div style={{fontSize:13,fontWeight:600,color:'#5A5547'}}>사용 내역 추가</div>
+              </div>
+
+              {/* Upload row */}
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+                <span style={{fontSize:11.5,color:'#8A8275'}}>업로드 파일 구분</span>
+                {Object.entries(CATEGORY).map(([key, cat]) => (
+                  <button key={key} onClick={() => setUploadCategory(key)}
+                    style={{padding:'5px 10px',border:`1px solid ${uploadCategory===key?cat.color:'#E3DCCB'}`,borderRadius:7,
+                      background:uploadCategory===key?cat.color:'#fff',color:uploadCategory===key?'#FAF7F0':'#5A5547',
+                      fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                    {cat.label}
+                  </button>
+                ))}
+                <button onClick={() => fileInputRef.current?.click()}
+                  style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:5,fontSize:12,fontWeight:600,
+                    color:'#3B5A6B',background:'#EAF0F2',border:'none',borderRadius:7,padding:'6px 11px',cursor:'pointer'}}>
+                  <IconUpload/> 엑셀 업로드
+                </button>
+                <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{display:'none'}}
+                  onChange={e => { const f=e.target.files?.[0]; if(f) handleFileUpload(f); e.target.value=''; }}
+                />
+              </div>
+              {uploadMsg && <div style={{fontSize:12,color:'#3B5A6B',background:'#EAF0F2',borderRadius:6,padding:'7px 10px',marginBottom:10}}>{uploadMsg}</div>}
+
+              {/* Manual entry */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:10}}>
+                <div style={{display:'flex',gap:6,gridColumn:'1/-1'}}>
+                  {Object.entries(CATEGORY).map(([key, cat]) => (
+                    <button key={key} onClick={() => setForm(f => ({...f, category:key}))}
+                      style={{flex:1,padding:'8px 0',border:`1px solid ${form.category===key?cat.color:'#E3DCCB'}`,borderRadius:8,
+                        background:form.category===key?cat.color:'#fff',color:form.category===key?'#FAF7F0':'#5A5547',
+                        fontSize:13,fontWeight:600,cursor:'pointer'}}>
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+                <input style={S.input} placeholder="사용자 이름" value={form.name}
+                  onChange={e => setForm(f => ({...f, name:e.target.value}))} />
+                <input style={S.input} placeholder="금액 (예: 35000)" value={form.amount} inputMode="numeric"
+                  onChange={e => setForm(f => ({...f, amount:e.target.value}))} />
+                <input style={S.input} type="date" value={form.date}
+                  onChange={e => setForm(f => ({...f, date:e.target.value}))} />
+                <input style={{...S.input, gridColumn:'1/-1'}} placeholder="메모 (선택, 예: 팀 회식 다과)"
+                  value={form.memo} onChange={e => setForm(f => ({...f, memo:e.target.value}))} />
+              </div>
+              <button onClick={addEntry}
+                style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'center',gap:6,
+                  background:'#2E2A24',color:'#FAF7F0',border:'none',borderRadius:8,padding:'10px 0',
+                  fontSize:13.5,fontWeight:600,cursor:'pointer'}}>
+                <IconPlus/> 내역 추가
+              </button>
+            </div>
+
+            {/* Entry list */}
+            <div style={{marginBottom:16}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,fontSize:13,fontWeight:600,color:'#5A5547',marginBottom:10}}>
+                <IconFile/>
+                <span>{monthLabel(currentMonth)} 사용 내역</span>
+                <span style={{marginLeft:'auto',fontFamily:"'IBM Plex Mono',monospace",fontSize:12,color:'#A6A092'}}>{entries.length}건</span>
+              </div>
+              {entries.length === 0 ? (
+                <div style={{background:'#fff',border:'1px dashed #E3DCCB',borderRadius:10,padding:'24px 16px',textAlign:'center',fontSize:13,color:'#A6A092'}}>
+                  아직 기록된 내역이 없어요. 통보받은 상신 내용을 위에서 추가해주세요.
+                </div>
+              ) : (
+                <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                  {entries.map(e => (
+                    <div key={e.id} style={{display:'flex',alignItems:'center',gap:10,background:'#fff',border:'1px solid #E3DCCB',borderRadius:10,padding:'10px 12px'}}>
+                      <div style={{width:7,height:7,borderRadius:'50%',flexShrink:0,background:CATEGORY[e.category].color}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                          <span style={{fontSize:13.5,fontWeight:600}}>{e.name}</span>
+                          <span style={{fontSize:10.5,color:'#8A8275',background:'#F0EBDD',padding:'1px 7px',borderRadius:20}}>{CATEGORY[e.category].label}</span>
+                          {e.source==='excel' && <span style={{fontSize:10,color:'#3B5A6B',background:'#EAF0F2',padding:'1px 6px',borderRadius:20,fontWeight:600}}>엑셀</span>}
+                          {e.date && <span style={{fontSize:11,color:'#A6A092',fontFamily:"'IBM Plex Mono',monospace"}}>{e.date}</span>}
+                        </div>
+                        {e.memo && <div style={{fontSize:11.5,color:'#A6A092',marginTop:2}}>{e.memo}</div>}
+                      </div>
+                      <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:13.5,whiteSpace:'nowrap'}}>{won(e.amount)}</div>
+                      <button onClick={() => removeEntry(e.id)}
+                        style={{border:'none',background:'transparent',color:'#C7C0B0',cursor:'pointer',padding:4,display:'flex'}}>
+                        <IconTrash/>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{textAlign:'center',fontSize:11,color:'#C7C0B0',marginTop:8}}>
+              데이터는 이 브라우저에 자동 저장돼요
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const S = {
+      navBtn: {
+        width:30,height:30,border:'1px solid #E3DCCB',background:'#fff',borderRadius:6,
+        fontSize:16,color:'#5A5547',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
+      },
+      monthLabel: {
+        fontFamily:"'IBM Plex Mono',monospace",fontSize:14,fontWeight:600,background:'#fff',
+        border:'1px solid #E3DCCB',borderRadius:6,padding:'6px 12px',cursor:'pointer',
+        display:'flex',alignItems:'center',color:'#2E2A24',
+      },
+      monthDropdown: {
+        position:'absolute',top:'110%',right:0,background:'#fff',border:'1px solid #E3DCCB',
+        borderRadius:8,boxShadow:'0 8px 24px rgba(46,42,36,0.12)',zIndex:10,minWidth:140,overflow:'hidden',
+      },
+      monthOption: {
+        display:'block',width:'100%',textAlign:'left',padding:'8px 14px',fontSize:13,
+        fontFamily:"'IBM Plex Mono',monospace",background:'transparent',border:'none',cursor:'pointer',color:'#5A5547',
+      },
+      monthOptionActive: { background:'#F0EBDD',color:'#2E2A24',fontWeight:600 },
+      input: {
+        border:'1px solid #E3DCCB',borderRadius:8,padding:'9px 12px',fontSize:13.5,
+        fontFamily:"'Inter',sans-serif",color:'#2E2A24',outline:'none',width:'100%',
+      },
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<BudgetTracker />);
+  </script>
+</body>
+</html>
